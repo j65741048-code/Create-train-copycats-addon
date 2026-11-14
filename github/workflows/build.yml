@@ -1,1 +1,822 @@
+# Create: Copycat Trains  (NeoForge 1.21.1)
+#
+# HOW TO USE (one file, no zip):
+#   1. Make an empty GitHub repo.
+#   2. In the browser: Add file > Create new file, name it  .github/workflows/build.yml
+#      and paste this whole file in. Commit.
+#   3. Open the Actions tab. The build starts by itself (or tap "Run workflow").
+#   4. When it finishes, download the artifact "CopycatTrains-jars".
+#        copycat_trains-full-*.jar  = everything (casings + bogeys)
+#        copycat_trains-safe-*.jar  = casings only (built as a fallback if "full" fails to compile)
+#      The run summary lists any compile errors; paste them to me and I will fix them.
 
+name: Build Create Copycat Trains
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.14.3'
+
+      - name: Generate project
+        run: |
+          python3 -m pip install --break-system-packages pillow || python3 -m pip install pillow || true
+          mkdir -p proj
+          cd proj
+          python3 - <<'PY'
+          import os, json, math
+
+          def w(path, text):
+              os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+              with open(path, 'w', encoding='utf-8') as f:
+                  f.write(text)
+
+          MOD = 'copycat_trains'
+          JAVA = 'src/main/java/com/copycattrains/'
+          RISKY = JAVA + 'risky/'
+          RES = 'src/main/resources/'
+          ASSETS = RES + 'assets/' + MOD + '/'
+          DATA = RES + 'data/' + MOD + '/'
+
+          # ---------------------------------------------------------------- gradle
+          w('settings.gradle', r'''
+          pluginManagement {
+              repositories {
+                  gradlePluginPortal()
+                  maven { url = 'https://maven.neoforged.net/releases' }
+              }
+          }
+          rootProject.name = 'copycat_trains'
+          '''.lstrip('\n'))
+
+          w('gradle.properties', 'org.gradle.jvmargs=-Xmx3G\norg.gradle.daemon=false\nmod_version=0.1.0\n')
+
+          w('build.gradle', r'''
+          plugins {
+              id 'java'
+              id 'net.neoforged.moddev' version 'MODDEV_VERSION'
+          }
+
+          def safeMode = project.hasProperty('safeMode')
+
+          group = 'com.copycattrains'
+          version = mod_version
+          base {
+              archivesName = safeMode ? 'copycat_trains-safe' : 'copycat_trains-full'
+          }
+
+          tasks.withType(JavaCompile).configureEach {
+              options.encoding = 'UTF-8'
+              options.release = 21
+          }
+
+          repositories {
+              mavenCentral()
+              maven { url = 'https://maven.createmod.net' }
+              maven { url = 'https://maven.tterrag.com/' }
+              maven { url = 'https://maven.neoforged.net/releases' }
+          }
+
+          neoForge {
+              version = neo_version
+          }
+
+          dependencies {
+              if (!safeMode) {
+                  if (!project.hasProperty('create_version')) {
+                      throw new GradleException('Could not resolve a Create 6.0.x version from maven.createmod.net')
+                  }
+                  implementation("com.simibubi.create:create-1.21.1:${create_version}:slim") { transitive = false }
+                  implementation("net.createmod.ponder:Ponder-NeoForge-1.21.1:${ponder_version}")
+                  compileOnly("dev.engine-room.flywheel:flywheel-neoforge-api-1.21.1:${flywheel_version}")
+                  compileOnly("dev.engine-room.flywheel:flywheel-neoforge-1.21.1:${flywheel_version}")
+                  implementation("com.tterrag.registrate:Registrate:${registrate_version}")
+              }
+          }
+
+          if (safeMode) {
+              sourceSets.main.java { exclude '**/risky/**' }
+          }
+
+          processResources {
+              def props = [mod_version: mod_version]
+              inputs.properties props
+              filesMatching('META-INF/neoforge.mods.toml') {
+                  expand props
+              }
+          }
+          '''.lstrip('\n'))
+
+          # ---------------------------------------------------------------- mods.toml
+          w(RES + 'META-INF/neoforge.mods.toml', r'''
+          modLoader="javafml"
+          loaderVersion="[4,)"
+          license="MIT"
+
+          [[mods]]
+          modId="copycat_trains"
+          version="${mod_version}"
+          displayName="Create: Copycat Trains"
+          logoFile="logo.png"
+          authors="You"
+          description="Copycat bogey casings and skinnable copycat bogeys for Create trains."
+
+          [[dependencies.copycat_trains]]
+          modId="neoforge"
+          type="required"
+          versionRange="[21.1,)"
+          ordering="NONE"
+          side="BOTH"
+
+          [[dependencies.copycat_trains]]
+          modId="minecraft"
+          type="required"
+          versionRange="[1.21.1,1.22)"
+          ordering="NONE"
+          side="BOTH"
+
+          [[dependencies.copycat_trains]]
+          modId="create"
+          type="required"
+          versionRange="[6.0.0,)"
+          ordering="AFTER"
+          side="BOTH"
+
+          [[dependencies.copycat_trains]]
+          modId="copycats"
+          type="optional"
+          versionRange="[3.0.0,)"
+          ordering="AFTER"
+          side="BOTH"
+          '''.lstrip('\n'))
+
+          # ---------------------------------------------------------------- java (always compiled)
+          w(JAVA + 'CopycatTrains.java', r'''
+          package com.copycattrains;
+
+          import com.mojang.logging.LogUtils;
+          import net.minecraft.core.registries.Registries;
+          import net.minecraft.network.chat.Component;
+          import net.minecraft.world.item.BlockItem;
+          import net.minecraft.world.item.CreativeModeTab;
+          import net.minecraft.world.item.Item;
+          import net.minecraft.world.item.ItemStack;
+          import net.minecraft.world.level.ItemLike;
+          import net.minecraft.world.level.block.Block;
+          import net.minecraft.world.level.block.SoundType;
+          import net.minecraft.world.level.block.state.BlockBehaviour;
+          import net.minecraft.world.level.material.MapColor;
+          import net.neoforged.bus.api.IEventBus;
+          import net.neoforged.fml.common.Mod;
+          import net.neoforged.neoforge.registries.DeferredBlock;
+          import net.neoforged.neoforge.registries.DeferredHolder;
+          import net.neoforged.neoforge.registries.DeferredItem;
+          import net.neoforged.neoforge.registries.DeferredRegister;
+          import org.slf4j.Logger;
+
+          import java.util.ArrayList;
+          import java.util.List;
+          import java.util.function.Supplier;
+
+          @Mod(CopycatTrains.MOD_ID)
+          public class CopycatTrains {
+              public static final String MOD_ID = "copycat_trains";
+              public static final Logger LOGGER = LogUtils.getLogger();
+
+              public static final DeferredRegister.Blocks BLOCKS = DeferredRegister.createBlocks(MOD_ID);
+              public static final DeferredRegister.Items ITEMS = DeferredRegister.createItems(MOD_ID);
+              public static final DeferredRegister<CreativeModeTab> TABS = DeferredRegister.create(Registries.CREATIVE_MODE_TAB, MOD_ID);
+
+              /** Items added by the optional "risky" module (the bogeys) show up in the tab through this list. */
+              public static final List<Supplier<? extends ItemLike>> EXTRA_TAB_ITEMS = new ArrayList<>();
+              public static final List<DeferredItem<BlockItem>> CASING_ITEMS = new ArrayList<>();
+
+              public static final DeferredBlock<Block> WHEELS_CASING = casing("copycat_bogey_casing_wheels");
+              public static final DeferredBlock<Block> MAIN_CASING = casing("copycat_bogey_casing_main");
+              public static final DeferredBlock<Block> BOTH_CASING = casing("copycat_bogey_casing_both");
+
+              public static final DeferredHolder<CreativeModeTab, CreativeModeTab> TAB = TABS.register("main", () ->
+                      CreativeModeTab.builder()
+                              .title(Component.translatable("itemGroup.copycat_trains"))
+                              .icon(() -> new ItemStack(BOTH_CASING.get()))
+                              .displayItems((params, out) -> {
+                                  for (DeferredItem<BlockItem> item : CASING_ITEMS) {
+                                      out.accept(item.get());
+                                  }
+                                  for (Supplier<? extends ItemLike> extra : EXTRA_TAB_ITEMS) {
+                                      out.accept(extra.get());
+                                  }
+                              })
+                              .build());
+
+              private static DeferredBlock<Block> casing(String name) {
+                  DeferredBlock<Block> block = BLOCKS.registerSimpleBlock(name, BlockBehaviour.Properties.of()
+                          .mapColor(MapColor.COLOR_GRAY)
+                          .strength(3.0F, 6.0F)
+                          .sound(SoundType.NETHERITE_BLOCK)
+                          .requiresCorrectToolForDrops());
+                  DeferredItem<BlockItem> item = ITEMS.register(name, () -> new BlockItem(block.get(), new Item.Properties()));
+                  CASING_ITEMS.add(item);
+                  return block;
+              }
+
+              public CopycatTrains(IEventBus modBus) {
+                  BLOCKS.register(modBus);
+                  ITEMS.register(modBus);
+                  TABS.register(modBus);
+
+                  // The bogey module touches Create internals. It lives in its own package so the build
+                  // can fall back to a casings-only jar if it does not compile.
+                  try {
+                      Class.forName("com.copycattrains.risky.RiskyInit").getMethod("init", IEventBus.class).invoke(null, modBus);
+                      LOGGER.info("Copycat Trains: full mode (casings + bogeys)");
+                  } catch (ClassNotFoundException e) {
+                      LOGGER.info("Copycat Trains: safe mode (casings only)");
+                  } catch (Throwable t) {
+                      LOGGER.error("Copycat Trains: the bogey module failed to start", t);
+                  }
+              }
+          }
+          '''.lstrip('\n'))
+
+          # ---------------------------------------------------------------- java (risky module)
+          w(RISKY + 'SkinMode.java', r'''
+          package com.copycattrains.risky;
+
+          public enum SkinMode {
+              /** Player replaces the wheel material. */
+              WHEELS,
+              /** Player replaces the main bogey block. */
+              MAIN,
+              /** Both. Sneak + use = wheels, plain use = main block. */
+              BOTH
+          }
+          '''.lstrip('\n'))
+
+          w(RISKY + 'RiskyInit.java', r'''
+          package com.copycattrains.risky;
+
+          import com.copycattrains.CopycatTrains;
+          import net.minecraft.world.item.BlockItem;
+          import net.neoforged.bus.api.IEventBus;
+          import net.neoforged.neoforge.registries.DeferredItem;
+
+          public final class RiskyInit {
+              private RiskyInit() {}
+
+              public static void init(IEventBus bus) {
+                  RiskyRegistry.BLOCKS.register(bus);
+                  RiskyRegistry.ITEMS.register(bus);
+                  RiskyRegistry.BLOCK_ENTITIES.register(bus);
+                  for (DeferredItem<BlockItem> item : RiskyRegistry.ITEM_LIST) {
+                      CopycatTrains.EXTRA_TAB_ITEMS.add(item::get);
+                  }
+              }
+          }
+          '''.lstrip('\n'))
+
+          w(RISKY + 'RiskyRegistry.java', r'''
+          package com.copycattrains.risky;
+
+          import com.copycattrains.CopycatTrains;
+          import com.simibubi.create.content.trains.bogey.BogeySizes;
+          import net.minecraft.core.registries.Registries;
+          import net.minecraft.world.item.BlockItem;
+          import net.minecraft.world.item.Item;
+          import net.minecraft.world.level.block.SoundType;
+          import net.minecraft.world.level.block.entity.BlockEntityType;
+          import net.minecraft.world.level.block.state.BlockBehaviour;
+          import net.minecraft.world.level.material.MapColor;
+          import net.neoforged.neoforge.registries.DeferredBlock;
+          import net.neoforged.neoforge.registries.DeferredHolder;
+          import net.neoforged.neoforge.registries.DeferredItem;
+          import net.neoforged.neoforge.registries.DeferredRegister;
+
+          import java.util.ArrayList;
+          import java.util.List;
+
+          public final class RiskyRegistry {
+              private RiskyRegistry() {}
+
+              public static final DeferredRegister.Blocks BLOCKS = DeferredRegister.createBlocks(CopycatTrains.MOD_ID);
+              public static final DeferredRegister.Items ITEMS = DeferredRegister.createItems(CopycatTrains.MOD_ID);
+              public static final DeferredRegister<BlockEntityType<?>> BLOCK_ENTITIES =
+                      DeferredRegister.create(Registries.BLOCK_ENTITY_TYPE, CopycatTrains.MOD_ID);
+
+              public static final List<DeferredItem<BlockItem>> ITEM_LIST = new ArrayList<>();
+
+              public static final DeferredBlock<SkinnableBogeyBlock> WHEELS_BOGEY = bogey("copycat_bogey_wheels", SkinMode.WHEELS);
+              public static final DeferredBlock<SkinnableBogeyBlock> MAIN_BOGEY = bogey("copycat_bogey_main", SkinMode.MAIN);
+              public static final DeferredBlock<SkinnableBogeyBlock> BOTH_BOGEY = bogey("copycat_bogey_both", SkinMode.BOTH);
+
+              public static final DeferredHolder<BlockEntityType<?>, BlockEntityType<SkinnableBogeyBlockEntity>> BOGEY_BE =
+                      BLOCK_ENTITIES.register("skinnable_bogey", () ->
+                              BlockEntityType.Builder.<SkinnableBogeyBlockEntity>of(
+                                      (pos, state) -> new SkinnableBogeyBlockEntity(RiskyRegistry.BOGEY_BE.get(), pos, state),
+                                      WHEELS_BOGEY.get(), MAIN_BOGEY.get(), BOTH_BOGEY.get()
+                              ).build(null));
+
+              public static List<DeferredBlock<SkinnableBogeyBlock>> allBogeys() {
+                  return List.of(WHEELS_BOGEY, MAIN_BOGEY, BOTH_BOGEY);
+              }
+
+              private static DeferredBlock<SkinnableBogeyBlock> bogey(String name, SkinMode mode) {
+                  DeferredBlock<SkinnableBogeyBlock> block = BLOCKS.register(name, () ->
+                          new SkinnableBogeyBlock(BlockBehaviour.Properties.of()
+                                  .mapColor(MapColor.COLOR_GRAY)
+                                  .strength(2.0F, 3.0F)
+                                  .sound(SoundType.NETHERITE_BLOCK)
+                                  .noOcclusion()
+                                  .requiresCorrectToolForDrops(), BogeySizes.SMALL, mode));
+                  DeferredItem<BlockItem> item = ITEMS.register(name, () -> new BlockItem(block.get(), new Item.Properties()));
+                  ITEM_LIST.add(item);
+                  return block;
+              }
+          }
+          '''.lstrip('\n'))
+
+          w(RISKY + 'SkinnableBogeyBlock.java', r'''
+          package com.copycattrains.risky;
+
+          import com.simibubi.create.content.trains.bogey.BogeySizes;
+          import com.simibubi.create.content.trains.bogey.StandardBogeyBlock;
+          import com.simibubi.create.content.trains.bogey.StandardBogeyBlockEntity;
+          import net.minecraft.core.BlockPos;
+          import net.minecraft.network.chat.Component;
+          import net.minecraft.world.InteractionHand;
+          import net.minecraft.world.ItemInteractionResult;
+          import net.minecraft.world.entity.player.Player;
+          import net.minecraft.world.item.BlockItem;
+          import net.minecraft.world.item.ItemStack;
+          import net.minecraft.world.level.Level;
+          import net.minecraft.world.level.block.entity.BlockEntityType;
+          import net.minecraft.world.level.block.state.BlockState;
+          import net.minecraft.world.phys.BlockHitResult;
+
+          /**
+           * A normal Create bogey (so trains can use it) whose block entity remembers a "main block"
+           * material and a "wheel" material chosen by the player (right-click with a block).
+           */
+          public class SkinnableBogeyBlock extends StandardBogeyBlock {
+              private final SkinMode mode;
+
+              public SkinnableBogeyBlock(Properties props, BogeySizes.BogeySize size, SkinMode mode) {
+                  super(props, size);
+                  this.mode = mode;
+              }
+
+              @Override
+              public BlockEntityType<? extends StandardBogeyBlockEntity> getBlockEntityType() {
+                  return RiskyRegistry.BOGEY_BE.get();
+              }
+
+              @Override
+              public Class<StandardBogeyBlockEntity> getBlockEntityClass() {
+                  return StandardBogeyBlockEntity.class;
+              }
+
+              @Override
+              public ItemInteractionResult useItemOn(ItemStack stack, BlockState state, Level level, BlockPos pos,
+                                                     Player player, InteractionHand hand, BlockHitResult hit) {
+                  if (stack.getItem() instanceof BlockItem blockItem && !(blockItem.getBlock() instanceof SkinnableBogeyBlock)) {
+                      BlockState material = blockItem.getBlock().defaultBlockState();
+                      if (material.hasBlockEntity() || !material.isCollisionShapeFullBlock(level, pos)) {
+                          return super.useItemOn(stack, state, level, pos, player, hand, hit);
+                      }
+                      if (level.getBlockEntity(pos) instanceof SkinnableBogeyBlockEntity be) {
+                          boolean wheels = mode == SkinMode.WHEELS || (mode == SkinMode.BOTH && player.isShiftKeyDown());
+                          if (!level.isClientSide) {
+                              if (wheels) {
+                                  be.setWheelMaterial(material);
+                                  player.displayClientMessage(Component.translatable("message.copycat_trains.wheels_set", material.getBlock().getName()), true);
+                              } else {
+                                  be.setMainMaterial(material);
+                                  player.displayClientMessage(Component.translatable("message.copycat_trains.main_set", material.getBlock().getName()), true);
+                              }
+                          }
+                          return ItemInteractionResult.sidedSuccess(level.isClientSide);
+                      }
+                  }
+                  return super.useItemOn(stack, state, level, pos, player, hand, hit);
+              }
+          }
+          '''.lstrip('\n'))
+
+          w(RISKY + 'SkinnableBogeyBlockEntity.java', r'''
+          package com.copycattrains.risky;
+
+          import com.simibubi.create.content.trains.bogey.StandardBogeyBlockEntity;
+          import net.minecraft.core.BlockPos;
+          import net.minecraft.core.HolderLookup;
+          import net.minecraft.core.registries.BuiltInRegistries;
+          import net.minecraft.nbt.CompoundTag;
+          import net.minecraft.nbt.NbtUtils;
+          import net.minecraft.world.level.block.Block;
+          import net.minecraft.world.level.block.entity.BlockEntityType;
+          import net.minecraft.world.level.block.state.BlockState;
+          import net.neoforged.neoforge.client.model.data.ModelData;
+          import net.neoforged.neoforge.client.model.data.ModelProperty;
+
+          public class SkinnableBogeyBlockEntity extends StandardBogeyBlockEntity {
+              public static final ModelProperty<BlockState> MAIN_MATERIAL = new ModelProperty<>();
+              public static final ModelProperty<BlockState> WHEEL_MATERIAL = new ModelProperty<>();
+
+              private BlockState mainMaterial;
+              private BlockState wheelMaterial;
+
+              public SkinnableBogeyBlockEntity(BlockEntityType<?> type, BlockPos pos, BlockState state) {
+                  super(type, pos, state);
+              }
+
+              public BlockState getMainMaterial() {
+                  return mainMaterial;
+              }
+
+              public BlockState getWheelMaterial() {
+                  return wheelMaterial;
+              }
+
+              public void setMainMaterial(BlockState material) {
+                  this.mainMaterial = material;
+                  saveAndSync();
+              }
+
+              public void setWheelMaterial(BlockState material) {
+                  this.wheelMaterial = material;
+                  saveAndSync();
+              }
+
+              private void saveAndSync() {
+                  setChanged();
+                  if (level != null) {
+                      level.sendBlockUpdated(worldPosition, getBlockState(), getBlockState(), Block.UPDATE_ALL);
+                  }
+              }
+
+              @Override
+              public void write(CompoundTag tag, HolderLookup.Provider registries, boolean clientPacket) {
+                  super.write(tag, registries, clientPacket);
+                  if (mainMaterial != null) {
+                      tag.put("MainMaterial", NbtUtils.writeBlockState(mainMaterial));
+                  }
+                  if (wheelMaterial != null) {
+                      tag.put("WheelMaterial", NbtUtils.writeBlockState(wheelMaterial));
+                  }
+              }
+
+              @Override
+              public void read(CompoundTag tag, HolderLookup.Provider registries, boolean clientPacket) {
+                  super.read(tag, registries, clientPacket);
+                  mainMaterial = tag.contains("MainMaterial")
+                          ? NbtUtils.readBlockState(BuiltInRegistries.BLOCK.asLookup(), tag.getCompound("MainMaterial")) : null;
+                  wheelMaterial = tag.contains("WheelMaterial")
+                          ? NbtUtils.readBlockState(BuiltInRegistries.BLOCK.asLookup(), tag.getCompound("WheelMaterial")) : null;
+                  if (clientPacket && level != null) {
+                      requestModelDataUpdate();
+                      level.sendBlockUpdated(worldPosition, getBlockState(), getBlockState(), Block.UPDATE_IMMEDIATE);
+                  }
+              }
+
+              @Override
+              public ModelData getModelData() {
+                  ModelData.Builder builder = ModelData.builder();
+                  if (mainMaterial != null) {
+                      builder.with(MAIN_MATERIAL, mainMaterial);
+                  }
+                  if (wheelMaterial != null) {
+                      builder.with(WHEEL_MATERIAL, wheelMaterial);
+                  }
+                  return builder.build();
+              }
+          }
+          '''.lstrip('\n'))
+
+          w(RISKY + 'SkinnedBogeyModel.java', r'''
+          package com.copycattrains.risky;
+
+          import net.minecraft.client.Minecraft;
+          import net.minecraft.client.renderer.RenderType;
+          import net.minecraft.client.renderer.block.model.BakedQuad;
+          import net.minecraft.client.renderer.texture.TextureAtlasSprite;
+          import net.minecraft.client.resources.model.BakedModel;
+          import net.minecraft.core.Direction;
+          import net.minecraft.util.RandomSource;
+          import net.minecraft.world.level.block.state.BlockState;
+          import net.neoforged.neoforge.client.ChunkRenderTypeSet;
+          import net.neoforged.neoforge.client.model.BakedModelWrapper;
+          import net.neoforged.neoforge.client.model.data.ModelData;
+          import org.jetbrains.annotations.Nullable;
+
+          import java.util.List;
+
+          /** Draws the player-chosen main block instead of the bogey's own block model. */
+          public class SkinnedBogeyModel extends BakedModelWrapper<BakedModel> {
+              public SkinnedBogeyModel(BakedModel original) {
+                  super(original);
+              }
+
+              private static BakedModel modelOf(BlockState material) {
+                  return Minecraft.getInstance().getBlockRenderer().getBlockModel(material);
+              }
+
+              @Override
+              public List<BakedQuad> getQuads(@Nullable BlockState state, @Nullable Direction side, RandomSource rand,
+                                              ModelData data, @Nullable RenderType renderType) {
+                  BlockState material = data.get(SkinnableBogeyBlockEntity.MAIN_MATERIAL);
+                  if (material == null) {
+                      return originalModel.getQuads(state, side, rand, data, renderType);
+                  }
+                  return modelOf(material).getQuads(material, side, rand, ModelData.EMPTY, renderType);
+              }
+
+              @Override
+              public ChunkRenderTypeSet getRenderTypes(BlockState state, RandomSource rand, ModelData data) {
+                  BlockState material = data.get(SkinnableBogeyBlockEntity.MAIN_MATERIAL);
+                  if (material == null) {
+                      return originalModel.getRenderTypes(state, rand, data);
+                  }
+                  return modelOf(material).getRenderTypes(material, rand, ModelData.EMPTY);
+              }
+
+              @Override
+              public TextureAtlasSprite getParticleIcon(ModelData data) {
+                  BlockState material = data.get(SkinnableBogeyBlockEntity.MAIN_MATERIAL);
+                  if (material == null) {
+                      return originalModel.getParticleIcon(data);
+                  }
+                  return modelOf(material).getParticleIcon(ModelData.EMPTY);
+              }
+          }
+          '''.lstrip('\n'))
+
+          w(RISKY + 'RiskyClient.java', r'''
+          package com.copycattrains.risky;
+
+          import com.copycattrains.CopycatTrains;
+          import net.minecraft.client.renderer.block.BlockModelShaper;
+          import net.minecraft.client.resources.model.BakedModel;
+          import net.minecraft.client.resources.model.ModelResourceLocation;
+          import net.minecraft.world.level.block.state.BlockState;
+          import net.neoforged.api.distmarker.Dist;
+          import net.neoforged.bus.api.SubscribeEvent;
+          import net.neoforged.fml.common.EventBusSubscriber;
+          import net.neoforged.neoforge.client.event.ModelEvent;
+          import net.neoforged.neoforge.registries.DeferredBlock;
+
+          @EventBusSubscriber(modid = CopycatTrains.MOD_ID, bus = EventBusSubscriber.Bus.MOD, value = Dist.CLIENT)
+          public final class RiskyClient {
+              private RiskyClient() {}
+
+              @SubscribeEvent
+              public static void onModifyBakingResult(ModelEvent.ModifyBakingResult event) {
+                  for (DeferredBlock<SkinnableBogeyBlock> holder : RiskyRegistry.allBogeys()) {
+                      for (BlockState state : holder.get().getStateDefinition().getPossibleStates()) {
+                          ModelResourceLocation location = BlockModelShaper.stateToModelLocation(state);
+                          BakedModel existing = event.getModels().get(location);
+                          if (existing != null) {
+                              event.getModels().put(location, new SkinnedBogeyModel(existing));
+                          }
+                      }
+                  }
+              }
+          }
+          '''.lstrip('\n'))
+
+          # ---------------------------------------------------------------- assets + data
+          CASINGS = ['wheels', 'main', 'both']
+          BOGEYS = ['wheels', 'main', 'both']
+          cname = lambda k: 'copycat_bogey_casing_' + k
+          bname = lambda k: 'copycat_bogey_' + k
+          ALL = [cname(k) for k in CASINGS] + [bname(k) for k in BOGEYS]
+
+          lang = {
+              'itemGroup.copycat_trains': 'Create: Copycat Trains',
+              'block.copycat_trains.copycat_bogey_casing_wheels': 'Copycat Bogey Casing (Wheels)',
+              'block.copycat_trains.copycat_bogey_casing_main': 'Copycat Bogey Casing (Main Block)',
+              'block.copycat_trains.copycat_bogey_casing_both': 'Copycat Bogey Casing (Wheels + Main Block)',
+              'block.copycat_trains.copycat_bogey_wheels': 'Copycat Bogey (Wheels)',
+              'block.copycat_trains.copycat_bogey_main': 'Copycat Bogey (Main Block)',
+              'block.copycat_trains.copycat_bogey_both': 'Copycat Bogey (Wheels + Main Block)',
+              'message.copycat_trains.main_set': 'Main block set to %s',
+              'message.copycat_trains.wheels_set': 'Wheel material set to %s',
+          }
+          w(ASSETS + 'lang/en_us.json', json.dumps(lang, indent=2))
+
+          for name in ALL:
+              is_bogey = not name.startswith('copycat_bogey_casing_')
+              w(ASSETS + 'models/block/%s.json' % name, json.dumps({
+                  'parent': 'minecraft:block/cube_all',
+                  'textures': {'all': 'copycat_trains:block/' + name}}, indent=2))
+              w(ASSETS + 'models/item/%s.json' % name, json.dumps({
+                  'parent': 'copycat_trains:block/' + name}, indent=2))
+              if is_bogey:
+                  # multipart with no condition: applies to every blockstate (axis, waterlogged, ...)
+                  w(ASSETS + 'blockstates/%s.json' % name, json.dumps({
+                      'multipart': [{'apply': {'model': 'copycat_trains:block/' + name}}]}, indent=2))
+              else:
+                  w(ASSETS + 'blockstates/%s.json' % name, json.dumps({
+                      'variants': {'': {'model': 'copycat_trains:block/' + name}}}, indent=2))
+              w(DATA + 'loot_table/blocks/%s.json' % name, json.dumps({
+                  'type': 'minecraft:block',
+                  'pools': [{
+                      'rolls': 1.0, 'bonus_rolls': 0.0,
+                      'entries': [{'type': 'minecraft:item', 'name': 'copycat_trains:' + name}],
+                      'conditions': [{'condition': 'minecraft:survives_explosion'}]}]}, indent=2))
+
+          # pickaxe tag (bogeys are optional entries so the casings-only jar still loads cleanly)
+          w(RES + 'data/minecraft/tags/block/mineable/pickaxe.json', json.dumps({
+              'replace': False,
+              'values': ['copycat_trains:' + cname(k) for k in CASINGS] +
+                        [{'id': 'copycat_trains:' + bname(k), 'required': False} for k in BOGEYS]}, indent=2))
+
+          # recipes (survival): ordinary train casing + a copycat block
+          PARTNER = {'wheels': 'copycats:copycat_slab', 'main': 'create:copycat_step', 'both': 'copycats:copycat_block'}
+          for k in CASINGS:
+              w(DATA + 'recipe/%s.json' % cname(k), json.dumps({
+                  'type': 'minecraft:crafting_shapeless',
+                  'category': 'building',
+                  'ingredients': [{'item': 'create:railway_casing'}, {'item': PARTNER[k]}],
+                  'result': {'id': 'copycat_trains:' + cname(k), 'count': 1}}, indent=2))
+              w(DATA + 'recipe/%s.json' % bname(k), json.dumps({
+                  'type': 'minecraft:crafting_shapeless',
+                  'category': 'misc',
+                  'ingredients': [{'item': 'copycat_trains:' + cname(k)}, {'item': 'create:small_bogey'}],
+                  'result': {'id': 'copycat_trains:' + bname(k), 'count': 1}}, indent=2))
+
+          # ---------------------------------------------------------------- textures + icon (Pillow)
+          from PIL import Image, ImageDraw
+
+          STEEL = (58, 66, 74, 255)
+          EDGE = (112, 122, 130, 255)
+          BRASS = (176, 128, 56, 255)
+          BRASS_HI = (222, 178, 92, 255)
+          ACCENT = {'wheels': (222, 178, 92, 255), 'main': (110, 170, 205, 255), 'both': (150, 205, 120, 255)}
+
+          def base_tile(fill):
+              im = Image.new('RGBA', (16, 16), fill)
+              d = ImageDraw.Draw(im)
+              d.rectangle([0, 0, 15, 15], outline=EDGE)
+              d.rectangle([1, 1, 14, 14], outline=BRASS)
+              for x, y in [(2, 2), (13, 2), (2, 13), (13, 13)]:
+                  im.putpixel((x, y), BRASS_HI)
+              return im, d
+
+          def mark_slab(d, c):
+              d.rectangle([4, 7, 11, 9], fill=c)
+
+          def mark_step(d, c):
+              d.rectangle([4, 10, 11, 11], fill=c)
+              d.rectangle([6, 7, 11, 9], fill=c)
+              d.rectangle([8, 4, 11, 6], fill=c)
+
+          def mark_block(d, c):
+              d.rectangle([5, 5, 10, 10], outline=c)
+              d.rectangle([7, 7, 8, 8], fill=c)
+
+          MARK = {'wheels': mark_slab, 'main': mark_step, 'both': mark_block}
+          os.makedirs(ASSETS + 'textures/block', exist_ok=True)
+          for k in CASINGS:
+              im, d = base_tile(STEEL)
+              MARK[k](d, ACCENT[k])
+              im.save(ASSETS + 'textures/block/%s.png' % cname(k))
+              im, d = base_tile((44, 50, 56, 255))
+              d.ellipse([3, 3, 12, 12], outline=ACCENT[k])
+              d.ellipse([6, 6, 9, 9], fill=ACCENT[k])
+              im.save(ASSETS + 'textures/block/%s.png' % bname(k))
+
+          # mod icon: brass cogwheel with a train wheel and rail
+          S = 512
+          icon = Image.new('RGBA', (S, S), (0, 0, 0, 0))
+          d = ImageDraw.Draw(icon)
+          cx = cy = S // 2
+          teeth, r_in, r_out = 12, 190, 236
+          step = 2 * math.pi / teeth
+          pts = []
+          for i in range(teeth):
+              a0 = i * step
+              for frac, r in ((0.0, r_in), (0.16, r_out), (0.52, r_out), (0.68, r_in)):
+                  a = a0 + frac * step
+                  pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
+          d.polygon(pts, fill=(196, 146, 62, 255), outline=(120, 82, 28, 255))
+          d.ellipse([cx - 175, cy - 175, cx + 175, cy + 175], fill=(150, 108, 44, 255))
+          d.ellipse([cx - 150, cy - 150, cx + 150, cy + 150], fill=(52, 58, 66, 255))
+          d.ellipse([cx - 112, cy - 112, cx + 112, cy + 112], outline=(214, 220, 226, 255), width=16)
+          for i in range(6):
+              a = i * math.pi / 3
+              d.line([cx, cy, cx + 100 * math.cos(a), cy + 100 * math.sin(a)], fill=(214, 220, 226, 255), width=10)
+          d.ellipse([cx - 26, cy - 26, cx + 26, cy + 26], fill=(222, 178, 92, 255))
+          d.rectangle([cx - 150, cy + 112, cx + 150, cy + 132], fill=(176, 184, 192, 255))
+          for tx in range(cx - 130, cx + 140, 52):
+              d.rectangle([tx, cy + 132, tx + 22, cy + 148], fill=(110, 80, 40, 255))
+          icon = icon.resize((128, 128), Image.LANCZOS)
+          icon.save(RES + 'logo.png')
+          print('project generated')
+          PY
+
+      - name: Resolve library versions
+        run: |
+          cd proj
+          python3 - <<'PY'
+          import re, urllib.request
+
+          def versions(urls):
+              for u in urls:
+                  try:
+                      req = urllib.request.Request(u, headers={'User-Agent': 'copycat-trains-build'})
+                      xml = urllib.request.urlopen(req, timeout=40).read().decode()
+                      found = re.findall(r'<version>([^<]+)</version>', xml)
+                      if found:
+                          print('ok  ', u)
+                          return found
+                  except Exception as e:
+                      print('miss', u, e)
+              return []
+
+          def newest(vs, pattern):
+              vs = [v for v in vs if re.match(pattern, v)]
+              if not vs:
+                  return None
+              return max(vs, key=lambda v: [int(x) for x in re.findall(r'\d+', v)])
+
+          props = []
+
+          moddev = newest(versions(['https://maven.neoforged.net/releases/net/neoforged/moddev/net.neoforged.moddev.gradle.plugin/maven-metadata.xml']), r'^2\.0\.\d+$') or '2.0.78'
+          neo = newest(versions(['https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml']), r'^21\.1\.\d+$')
+          if not neo:
+              raise SystemExit('Could not resolve a NeoForge 21.1.x version')
+          props.append('neo_version=' + neo)
+
+          CM = 'https://maven.createmod.net/'
+          create = newest(versions([CM + 'com/simibubi/create/create-1.21.1/maven-metadata.xml']), r'^6\.0\.')
+          ponder = newest(versions([CM + 'net/createmod/ponder/Ponder-NeoForge-1.21.1/maven-metadata.xml',
+                                    CM + 'net/createmod/ponder/ponder-neoforge-1.21.1/maven-metadata.xml']), r'^1\.0\.')
+          fly = newest(versions([CM + 'dev/engine-room/flywheel/flywheel-neoforge-1.21.1/maven-metadata.xml']), r'^1\.0\.')
+          reg = newest(versions([CM + 'com/tterrag/registrate/Registrate/maven-metadata.xml',
+                                 'https://maven.tterrag.com/com/tterrag/registrate/Registrate/maven-metadata.xml']), r'^MC1\.21')
+          for key, val in (('create_version', create), ('ponder_version', ponder), ('flywheel_version', fly), ('registrate_version', reg)):
+              if val:
+                  props.append('%s=%s' % (key, val))
+              else:
+                  print('WARNING: could not resolve', key)
+
+          with open('gradle.properties', 'a') as f:
+              f.write('\n'.join(props) + '\n')
+          with open('build.gradle') as f:
+              txt = f.read().replace('MODDEV_VERSION', moddev)
+          with open('build.gradle', 'w') as f:
+              f.write(txt)
+          print('\n'.join(props), 'moddev=' + moddev, sep='\n')
+          PY
+
+      - name: Compile (full jar, then safe fallback jar)
+        run: |
+          cd proj
+          mkdir -p out
+          set +e
+          gradle build --no-daemon --stacktrace > full.log 2>&1
+          FULL=$?
+          cp build/libs/copycat_trains-full-*.jar out/ 2>/dev/null
+          gradle clean --no-daemon > /dev/null 2>&1
+          gradle build -PsafeMode=true --no-daemon --stacktrace > safe.log 2>&1
+          SAFE=$?
+          cp build/libs/copycat_trains-safe-*.jar out/ 2>/dev/null
+          {
+            echo "## Create: Copycat Trains build"
+            echo ""
+            echo "- full build (casings + bogeys): exit code $FULL"
+            echo "- safe build (casings only): exit code $SAFE"
+            echo ""
+            echo "Jars in the artifact:"
+            ls -1 out | sed 's/^/- /'
+            if [ "$FULL" != "0" ]; then
+              echo ""
+              echo "### Full build errors (send these to Claude)"
+              echo '```'
+              grep -E "error:|What went wrong|Could not (resolve|find)|cannot find symbol|symbol:|location:" -A2 full.log | head -80
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          test -n "$(ls out/*.jar 2>/dev/null)"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: CopycatTrains-jars
+          path: |
+            proj/out
+            proj/full.log
+            proj/safe.log
